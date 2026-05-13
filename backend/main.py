@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
 import os
+import re
 import glob
 import json
 import uuid
@@ -44,10 +45,18 @@ COBALT_API = "https://api.cobalt.tools/"
 COBALT_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (compatible; VidFetch/1.0)",
 }
 
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
+
+def clean_youtube_url(url: str) -> str:
+    """Extract clean video URL, removing playlist/tracking params."""
+    match = re.search(r'(?:youtu\.be/|[?&]v=)([a-zA-Z0-9_-]{11})', url)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return url
 
 def get_youtube_info_oembed(url: str, dl_type: str) -> dict:
     """Get YouTube info via oEmbed (no auth, no bot detection)."""
@@ -77,13 +86,28 @@ def get_youtube_info_oembed(url: str, dl_type: str) -> dict:
 
 def get_cobalt_url(url: str, quality: str, dl_type: str) -> str:
     """Call Cobalt API to get a direct download URL."""
+    # Clean YouTube URLs (remove playlist params that break Cobalt)
+    if is_youtube(url):
+        url = clean_youtube_url(url)
+
     if dl_type == "mp3":
-        payload = {"url": url, "downloadMode": "audio", "audioFormat": "mp3"}
+        payload = {
+            "url": url,
+            "downloadMode": "audio",
+            "audioFormat": "mp3",
+            "audioQuality": "320",
+        }
     else:
-        payload = {"url": url, "downloadMode": "auto", "videoQuality": quality}
+        payload = {
+            "url": url,
+            "downloadMode": "auto",
+            "videoQuality": quality,
+            "filenameStyle": "basic",
+        }
 
     resp = req.post(COBALT_API, json=payload, headers=COBALT_HEADERS, timeout=30)
-    resp.raise_for_status()
+    if not resp.ok:
+        raise Exception(f"Cobalt API hatası: {resp.status_code} – {resp.text[:200]}")
     data = resp.json()
     status = data.get("status")
 
