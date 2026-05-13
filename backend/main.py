@@ -41,12 +41,16 @@ if _cookie_content:
     _COOKIE_FILE = _tmp.name
 
 # ── Cobalt API ────────────────────────────────────────────────────────────────
-COBALT_API = "https://api.cobalt.tools/"
+COBALT_API = os.environ.get("COBALT_API_URL", "https://api.cobalt.tools/")
+COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "").strip()
+
 COBALT_HEADERS = {
     "Accept": "application/json",
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0 (compatible; VidFetch/1.0)",
 }
+if COBALT_API_KEY:
+    COBALT_HEADERS["Authorization"] = f"Api-Key {COBALT_API_KEY}"
 
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
