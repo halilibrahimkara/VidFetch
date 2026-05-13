@@ -1,0 +1,17 @@
+# VidFetch
+## Git
+.git/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.local
+
+## Backend
+backend/downloads/
+*.tmp
+
+## Frontend build (Netlify builds from source)
+frontend/dist/
+frontend/node_modules/
