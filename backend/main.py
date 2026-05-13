@@ -124,13 +124,13 @@ def get_video_info(req: VideoRequest):
             ) if info.get("formats") else 0
 
             if max_height >= 1080:
-                formats.append({"format_id": "bv[height<=1080][ext=mp4]+ba[ext=m4a]/bv[height<=1080]+ba/b[height<=1080]", "ext": "mp4", "resolution": "1080p", "note": "FHD"})
+                formats.append({"format_id": "bestvideo[height<=1080]+bestaudio/best[height<=1080]", "ext": "mp4", "resolution": "1080p", "note": "FHD"})
             if max_height >= 720:
-                formats.append({"format_id": "bv[height<=720][ext=mp4]+ba[ext=m4a]/bv[height<=720]+ba/b[height<=720]",   "ext": "mp4", "resolution": "720p",  "note": "HD"})
+                formats.append({"format_id": "bestvideo[height<=720]+bestaudio/best[height<=720]",   "ext": "mp4", "resolution": "720p",  "note": "HD"})
             if max_height >= 480:
-                formats.append({"format_id": "bv[height<=480][ext=mp4]+ba[ext=m4a]/bv[height<=480]+ba/b[height<=480]",   "ext": "mp4", "resolution": "480p",  "note": "SD"})
+                formats.append({"format_id": "bestvideo[height<=480]+bestaudio/best[height<=480]",   "ext": "mp4", "resolution": "480p",  "note": "SD"})
             if not formats:
-                formats.append({"format_id": "b", "ext": "mp4", "resolution": "En İyi Kalite", "note": "Standart"})
+                formats.append({"format_id": "best", "ext": "mp4", "resolution": "En İyi Kalite", "note": "Standart"})
 
         return {
             "title":     info.get("title", "Unknown"),
