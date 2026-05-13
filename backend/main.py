@@ -10,26 +10,20 @@ import uuid
 import threading
 import shutil
 import tempfile
+import requests as req
 
-# ── FFmpeg path ──────────────────────────────────────────────────────────────
+# ── FFmpeg path ───────────────────────────────────────────────────────────────
 _FFMPEG_EXE = shutil.which("ffmpeg")
-if _FFMPEG_EXE:
-    FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE)
-else:
-    FFMPEG_BIN = (
-        r"C:\Users\halil\AppData\Local\Microsoft\WinGet\Packages"
-        r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
-        r"\ffmpeg-8.1.1-full_build\bin"
-    )
+FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE) if _FFMPEG_EXE else (
+    r"C:\Users\halil\AppData\Local\Microsoft\WinGet\Packages"
+    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+    r"\ffmpeg-8.1.1-full_build\bin"
+)
 
-# ── YouTube Cookies ──────────────────────────────────────────────────────────
-# Render'da iki seçenekten biri:
-#   YOUTUBE_COOKIES_B64  →  cookies.txt içeriğinin base64 hali (önerilen)
-#   YOUTUBE_COOKIES      →  cookies.txt içeriği düz metin
+# ── YouTube Cookies (fallback for yt-dlp info calls) ─────────────────────────
 _COOKIE_FILE = None
 _cookie_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
 _cookie_raw = os.environ.get("YOUTUBE_COOKIES", "").strip()
-
 _cookie_content = None
 if _cookie_b64:
     import base64 as _b64
@@ -39,22 +33,73 @@ if _cookie_b64:
         pass
 elif _cookie_raw:
     _cookie_content = _cookie_raw
-
 if _cookie_content:
     _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
     _tmp.write(_cookie_content)
     _tmp.close()
     _COOKIE_FILE = _tmp.name
 
+# ── Cobalt API ────────────────────────────────────────────────────────────────
+COBALT_API = "https://api.cobalt.tools/"
+COBALT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+}
+
+def is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+def get_youtube_info_oembed(url: str, dl_type: str) -> dict:
+    """Get YouTube info via oEmbed (no auth, no bot detection)."""
+    oembed = req.get(
+        f"https://www.youtube.com/oembed?url={url}&format=json",
+        timeout=10
+    )
+    if not oembed.ok:
+        raise Exception("YouTube video bilgisi alınamadı (oEmbed)")
+    data = oembed.json()
+
+    if dl_type == "mp3":
+        formats = [{"format_id": "mp3", "ext": "mp3", "resolution": "Yüksek Kalite", "note": "Ses"}]
+    else:
+        formats = [
+            {"format_id": "1080", "ext": "mp4", "resolution": "1080p", "note": "FHD"},
+            {"format_id": "720",  "ext": "mp4", "resolution": "720p",  "note": "HD"},
+            {"format_id": "480",  "ext": "mp4", "resolution": "480p",  "note": "SD"},
+        ]
+    return {
+        "title":     data.get("title", "Unknown"),
+        "thumbnail": data.get("thumbnail_url", ""),
+        "duration":  0,
+        "platform":  "youtube",
+        "formats":   formats,
+    }
+
+def get_cobalt_url(url: str, quality: str, dl_type: str) -> str:
+    """Call Cobalt API to get a direct download URL."""
+    if dl_type == "mp3":
+        payload = {"url": url, "downloadMode": "audio", "audioFormat": "mp3"}
+    else:
+        payload = {"url": url, "downloadMode": "auto", "videoQuality": quality}
+
+    resp = req.post(COBALT_API, json=payload, headers=COBALT_HEADERS, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    status = data.get("status")
+
+    if status in ("redirect", "tunnel"):
+        return data["url"]
+    elif status == "picker":
+        return data["picker"][0]["url"]
+    else:
+        err = data.get("error", {})
+        raise Exception(f"Cobalt hatası: {err.get('code', str(data))}")
+
 def _base_ydl_opts() -> dict:
-    """Common yt-dlp options shared by info and download endpoints."""
     opts = {
         "quiet": True,
         "no_color": True,
         "ffmpeg_location": FFMPEG_BIN,
-        "extractor_args": {
-            "youtube": {"player_client": ["android", "web"]}
-        },
     }
     if _COOKIE_FILE:
         opts["cookiefile"] = _COOKIE_FILE
@@ -62,7 +107,6 @@ def _base_ydl_opts() -> dict:
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="VidFetch API")
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -89,46 +133,46 @@ def cleanup_file(filepath: str):
     except Exception:
         pass
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/")
 def read_root():
-    return {
-        "message": "VidFetch API is running",
-        "ffmpeg": FFMPEG_BIN,
-        "cookies": bool(_COOKIE_FILE),
-    }
+    return {"message": "VidFetch API is running", "ffmpeg": FFMPEG_BIN, "cookies": bool(_COOKIE_FILE)}
+
 
 @app.post("/api/info")
-def get_video_info(req: VideoRequest):
-    ydl_opts = {
-        **_base_ydl_opts(),
-        "skip_download": True,
-        "noplaylist": True,
-    }
+def get_video_info(req_body: VideoRequest):
+    url = req_body.url
+    dl_type = req_body.type
+
+    # YouTube: use oEmbed to avoid bot detection
+    if is_youtube(url):
+        try:
+            return get_youtube_info_oembed(url, dl_type)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # Other platforms: use yt-dlp
+    ydl_opts = {**_base_ydl_opts(), "skip_download": True, "noplaylist": True}
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
+            info = ydl.extract_info(url, download=False)
 
         formats = []
-        if req.type == "mp3":
-            formats.append({
-                "format_id": "bestaudio/best",
-                "ext": "mp3",
-                "resolution": "Yüksek Kalite",
-                "note": "Ses",
-            })
+        if dl_type == "mp3":
+            formats.append({"format_id": "mp3", "ext": "mp3", "resolution": "Yüksek Kalite", "note": "Ses"})
         else:
-            max_height = max(
+            max_h = max(
                 (f.get("height", 0) or 0)
                 for f in info.get("formats", [])
                 if f.get("vcodec") != "none"
             ) if info.get("formats") else 0
 
-            if max_height >= 1080:
+            if max_h >= 1080:
                 formats.append({"format_id": "bestvideo[height<=1080]+bestaudio/best[height<=1080]", "ext": "mp4", "resolution": "1080p", "note": "FHD"})
-            if max_height >= 720:
-                formats.append({"format_id": "bestvideo[height<=720]+bestaudio/best[height<=720]",   "ext": "mp4", "resolution": "720p",  "note": "HD"})
-            if max_height >= 480:
-                formats.append({"format_id": "bestvideo[height<=480]+bestaudio/best[height<=480]",   "ext": "mp4", "resolution": "480p",  "note": "SD"})
+            if max_h >= 720:
+                formats.append({"format_id": "bestvideo[height<=720]+bestaudio/best[height<=720]", "ext": "mp4", "resolution": "720p", "note": "HD"})
+            if max_h >= 480:
+                formats.append({"format_id": "bestvideo[height<=480]+bestaudio/best[height<=480]", "ext": "mp4", "resolution": "480p", "note": "SD"})
             if not formats:
                 formats.append({"format_id": "best", "ext": "mp4", "resolution": "En İyi Kalite", "note": "Standart"})
 
@@ -146,55 +190,89 @@ def get_video_info(req: VideoRequest):
 def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
     try:
         os.makedirs("./downloads", exist_ok=True)
+        filepath = None
 
-        def progress_hook(d):
-            if d["status"] == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-                downloaded = d.get("downloaded_bytes", 0)
-                if total > 0:
-                    jobs[job_id]["progress"] = round((downloaded / total) * 90)
-            elif d["status"] == "finished":
-                jobs[job_id]["progress"] = 95
+        # YouTube & Cobalt-compatible: use Cobalt API
+        cobalt_quality = format_id if format_id in ("mp3", "1080", "720", "480") else None
 
-        ydl_opts = {
-            **_base_ydl_opts(),
-            "format": format_id,
-            "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
-            "noplaylist": True,
-            "progress_hooks": [progress_hook],
-            "merge_output_format": "mp4" if dl_type == "mp4" else None,
-        }
-        if dl_type == "mp3":
-            ydl_opts["postprocessors"] = [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }]
+        if cobalt_quality or is_youtube(url):
+            quality = cobalt_quality or ("mp3" if dl_type == "mp3" else "1080")
+            jobs[job_id]["progress"] = 10
+            cobalt_url = get_cobalt_url(url, quality, dl_type)
+            jobs[job_id]["progress"] = 20
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.extract_info(url, download=True)
+            ext = "mp3" if dl_type == "mp3" else "mp4"
+            filename = f"vidfetch_{job_id}.{ext}"
+            filepath = f"./downloads/{filename}"
 
-        files = glob.glob(f"./downloads/{job_id}_*")
-        if not files:
-            jobs[job_id].update({"status": "error", "error": "Dosya bulunamadı."})
-            return
+            # Stream download from Cobalt URL
+            with req.get(cobalt_url, stream=True, timeout=120) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(filepath, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                pct = 20 + round((downloaded / total) * 75)
+                                jobs[job_id]["progress"] = min(pct, 95)
 
-        filepath = files[0]
+            clean_name = filename.replace(f"_{job_id}", "")
+
+        else:
+            # Other platforms: use yt-dlp directly
+            def progress_hook(d):
+                if d["status"] == "downloading":
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                    done = d.get("downloaded_bytes", 0)
+                    if total > 0:
+                        jobs[job_id]["progress"] = round((done / total) * 90)
+                elif d["status"] == "finished":
+                    jobs[job_id]["progress"] = 95
+
+            ydl_opts = {
+                **_base_ydl_opts(),
+                "format": format_id,
+                "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
+                "noplaylist": True,
+                "progress_hooks": [progress_hook],
+                "merge_output_format": "mp4" if dl_type == "mp4" else None,
+            }
+            if dl_type == "mp3":
+                ydl_opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(url, download=True)
+
+            files = glob.glob(f"./downloads/{job_id}_*")
+            if not files:
+                raise Exception("Dosya bulunamadı")
+            filepath = files[0]
+            clean_name = os.path.basename(filepath).replace(f"{job_id}_", "")
+
         jobs[job_id].update({
-            "status":   "done",
-            "progress": 100,
-            "filepath": filepath,
-            "filename": os.path.basename(filepath).replace(f"{job_id}_", ""),
+            "status": "done", "progress": 100,
+            "filepath": filepath, "filename": clean_name,
         })
     except Exception as e:
         jobs[job_id].update({"status": "error", "error": str(e)})
 
 
 @app.post("/api/download/start")
-def start_download(req: DownloadRequest):
+def start_download(req_body: DownloadRequest):
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "running", "progress": 0, "filepath": None, "filename": None, "error": None}
-    threading.Thread(target=_do_download, args=(job_id, req.url, req.format_id, req.type), daemon=True).start()
+    threading.Thread(
+        target=_do_download,
+        args=(job_id, req_body.url, req_body.format_id, req_body.type),
+        daemon=True
+    ).start()
     return {"job_id": job_id}
 
 
@@ -224,5 +302,4 @@ def serve_file(job_id: str, background_tasks: BackgroundTasks):
     filepath, filename = job["filepath"], job["filename"]
     background_tasks.add_task(cleanup_file, filepath)
     jobs.pop(job_id, None)
-
     return FileResponse(path=filepath, filename=filename, media_type="application/octet-stream")
