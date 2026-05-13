@@ -41,16 +41,25 @@ if _cookie_content:
     _COOKIE_FILE = _tmp.name
 
 # ── Cobalt API ────────────────────────────────────────────────────────────────
-COBALT_API = os.environ.get("COBALT_API_URL", "https://api.cobalt.tools/")
+COBALT_INSTANCES = [
+    os.environ.get("COBALT_API_URL", "").strip(),
+    "https://cobalt.peppe8o.com/",
+    "https://cobalt.q0.wtf/",
+    "https://api.cobalt.best/",
+]
+COBALT_INSTANCES = [url for url in COBALT_INSTANCES if url]
+
 COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "").strip()
 
-COBALT_HEADERS = {
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": "Mozilla/5.0 (compatible; VidFetch/1.0)",
-}
-if COBALT_API_KEY:
-    COBALT_HEADERS["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+def get_cobalt_headers():
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    if COBALT_API_KEY:
+        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+    return headers
 
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
@@ -109,19 +118,31 @@ def get_cobalt_url(url: str, quality: str, dl_type: str) -> str:
             "filenameStyle": "basic",
         }
 
-    resp = req.post(COBALT_API, json=payload, headers=COBALT_HEADERS, timeout=30)
-    if not resp.ok:
-        raise Exception(f"Cobalt API hatası: {resp.status_code} – {resp.text[:200]}")
-    data = resp.json()
-    status = data.get("status")
+    last_err = None
+    for api_url in COBALT_INSTANCES:
+        api_endpoint = api_url.rstrip("/") + "/"
+        try:
+            resp = req.post(api_endpoint, json=payload, headers=get_cobalt_headers(), timeout=15)
+            if resp.ok:
+                data = resp.json()
+                status = data.get("status")
+                
+                if status in ("redirect", "tunnel"):
+                    return data["url"]
+                elif status == "picker":
+                    return data["picker"][0]["url"]
+                else:
+                    err = data.get("error", {})
+                    raise Exception(f"Cobalt hatası: {err.get('code', str(data))}")
+            else:
+                last_err = f"API hatası ({resp.status_code}): {resp.text[:100]}"
+                if resp.status_code == 400 and "auth" in resp.text.lower():
+                    continue # Auth istiyorsa diğer instance'a geç
+        except Exception as e:
+            last_err = str(e)
+            continue # Hata varsa diğerine geç
 
-    if status in ("redirect", "tunnel"):
-        return data["url"]
-    elif status == "picker":
-        return data["picker"][0]["url"]
-    else:
-        err = data.get("error", {})
-        raise Exception(f"Cobalt hatası: {err.get('code', str(data))}")
+    raise Exception(f"Tüm Cobalt sunucuları denendi, başarısız: {last_err}")
 
 def _base_ydl_opts() -> dict:
     opts = {
