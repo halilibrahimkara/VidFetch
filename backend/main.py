@@ -49,32 +49,51 @@ def get_youtube_mp3_url(video_id: str) -> str:
         "x-rapidapi-key": RAPIDAPI_KEY,
         "x-rapidapi-host": "youtube-mp36.p.rapidapi.com",
     }
-    for _ in range(40):  # poll ~2 min
-        try:
-            r = req.get("https://youtube-mp36.p.rapidapi.com/dl",
-                        params={"id": video_id}, headers=headers, timeout=30)
-            if r.ok:
-                d = r.json()
-                if d.get("status") == "ok":
-                    return d["link"]
-                if d.get("status") == "fail":
-                    raise Exception(f"MP3 hatasi: {d.get('msg','bilinmiyor')}")
-        except Exception as e:
-            if "hatasi" in str(e):
-                raise
-        time.sleep(3)
-    raise Exception("MP3 donusumu zaman asimina ugradi (2dk)")
+    # Try up to 3 full conversion cycles (in case cached URL is stale/expired)
+    for cycle in range(3):
+        for _ in range(40):  # poll ~2 min per cycle
+            try:
+                r = req.get("https://youtube-mp36.p.rapidapi.com/dl",
+                            params={"id": video_id}, headers=headers, timeout=30)
+                if r.ok:
+                    d = r.json()
+                    if d.get("status") == "ok":
+                        link = d["link"]
+                        # Validate the CDN link is actually alive
+                        try:
+                            check = req.head(link, timeout=10, allow_redirects=True)
+                            if check.status_code < 400:
+                                return link
+                            # Stale/expired cached URL — force re-conversion by waiting
+                        except Exception:
+                            pass
+                        # URL is dead, break inner loop and retry conversion
+                        break
+                    if d.get("status") == "fail":
+                        raise Exception(f"MP3 hatasi: {d.get('msg','bilinmiyor')}")
+                    # status == "processing" — keep polling
+            except Exception as e:
+                if "hatasi" in str(e):
+                    raise
+            time.sleep(3)
+        # Wait before next conversion cycle
+        time.sleep(5)
+    raise Exception("MP3 donusumu basarisiz oldu (CDN linki surekli gecersiz)")
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
+# Tor SOCKS5 proxy — routes YouTube traffic through Tor exit nodes (residential-like IPs)
+TOR_PROXY = "socks5h://127.0.0.1:9050"
+
 # YouTube player clients to try in order (mobile/TV clients bypass bot detection better)
 YT_CLIENTS = ["ios", "android_vr", "tv_embedded", "web_creator"]
 
 def _yt_opts(extra: dict = None) -> dict:
-    """Base yt-dlp options, tries mobile clients to avoid bot detection."""
+    """yt-dlp options for YouTube — uses Tor proxy + mobile clients."""
     opts = {
         "quiet": True,
         "no_color": True,
         "noplaylist": True,
+        "proxy": TOR_PROXY,
         "extractor_args": {
             "youtube": {
                 "player_client": YT_CLIENTS,
