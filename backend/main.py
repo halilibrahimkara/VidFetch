@@ -71,6 +71,11 @@ def get_video_info(req: VideoRequest):
         "noplaylist": True,
         "no_color": True,
         "ffmpeg_location": FFMPEG_BIN,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+            }
+        },
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -132,6 +137,11 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
             "ffmpeg_location": FFMPEG_BIN,
             "progress_hooks": [progress_hook],
             "merge_output_format": "mp4" if dl_type == "mp4" else None,
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "web"],
+                }
+            },
         }
         if dl_type == "mp3":
             ydl_opts["postprocessors"] = [{
