@@ -9,23 +9,58 @@ import json
 import uuid
 import threading
 import shutil
+import tempfile
 
-# ── FFmpeg path ─────────────────────────────────────────────────────────────
-# On Render (Linux) ffmpeg is in PATH.  On Windows dev machine use the winget
-# install location as fallback.
+# ── FFmpeg path ──────────────────────────────────────────────────────────────
 _FFMPEG_EXE = shutil.which("ffmpeg")
 if _FFMPEG_EXE:
-    # Give yt-dlp the directory that contains ffmpeg / ffprobe
     FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE)
 else:
-    # Windows local fallback (development only)
     FFMPEG_BIN = (
         r"C:\Users\halil\AppData\Local\Microsoft\WinGet\Packages"
         r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
         r"\ffmpeg-8.1.1-full_build\bin"
     )
 
-# ── App ──────────────────────────────────────────────────────────────────────
+# ── YouTube Cookies ──────────────────────────────────────────────────────────
+# Render'da iki seçenekten biri:
+#   YOUTUBE_COOKIES_B64  →  cookies.txt içeriğinin base64 hali (önerilen)
+#   YOUTUBE_COOKIES      →  cookies.txt içeriği düz metin
+_COOKIE_FILE = None
+_cookie_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+_cookie_raw = os.environ.get("YOUTUBE_COOKIES", "").strip()
+
+_cookie_content = None
+if _cookie_b64:
+    import base64 as _b64
+    try:
+        _cookie_content = _b64.b64decode(_cookie_b64).decode("utf-8")
+    except Exception:
+        pass
+elif _cookie_raw:
+    _cookie_content = _cookie_raw
+
+if _cookie_content:
+    _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+    _tmp.write(_cookie_content)
+    _tmp.close()
+    _COOKIE_FILE = _tmp.name
+
+def _base_ydl_opts() -> dict:
+    """Common yt-dlp options shared by info and download endpoints."""
+    opts = {
+        "quiet": True,
+        "no_color": True,
+        "ffmpeg_location": FFMPEG_BIN,
+        "extractor_args": {
+            "youtube": {"player_client": ["android", "web"]}
+        },
+    }
+    if _COOKIE_FILE:
+        opts["cookiefile"] = _COOKIE_FILE
+    return opts
+
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="VidFetch API")
 
 app.add_middleware(
@@ -36,10 +71,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory job store  { job_id: { status, progress, filepath, filename, error } }
 jobs: dict = {}
 
-# ── Models ───────────────────────────────────────────────────────────────────
 class VideoRequest(BaseModel):
     url: str
     type: str = "mp4"
@@ -49,7 +82,6 @@ class DownloadRequest(BaseModel):
     format_id: str
     type: str
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 def cleanup_file(filepath: str):
     try:
         if filepath and os.path.exists(filepath):
@@ -57,25 +89,20 @@ def cleanup_file(filepath: str):
     except Exception:
         pass
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
 @app.get("/")
 def read_root():
-    return {"message": "VidFetch API is running", "ffmpeg": FFMPEG_BIN}
-
+    return {
+        "message": "VidFetch API is running",
+        "ffmpeg": FFMPEG_BIN,
+        "cookies": bool(_COOKIE_FILE),
+    }
 
 @app.post("/api/info")
 def get_video_info(req: VideoRequest):
     ydl_opts = {
-        "quiet": True,
+        **_base_ydl_opts(),
         "skip_download": True,
         "noplaylist": True,
-        "no_color": True,
-        "ffmpeg_location": FFMPEG_BIN,
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["android", "web"],
-            }
-        },
     }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -130,18 +157,12 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
                 jobs[job_id]["progress"] = 95
 
         ydl_opts = {
+            **_base_ydl_opts(),
             "format": format_id,
             "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
-            "quiet": True,
             "noplaylist": True,
-            "ffmpeg_location": FFMPEG_BIN,
             "progress_hooks": [progress_hook],
             "merge_output_format": "mp4" if dl_type == "mp4" else None,
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "web"],
-                }
-            },
         }
         if dl_type == "mp3":
             ydl_opts["postprocessors"] = [{
