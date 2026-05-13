@@ -81,19 +81,14 @@ def get_youtube_mp3_url(video_id: str) -> str:
     raise Exception("MP3 donusumu basarisiz oldu (CDN linki surekli gecersiz)")
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
-# Tor SOCKS5 proxy — routes YouTube traffic through Tor exit nodes (residential-like IPs)
-TOR_PROXY = "socks5h://127.0.0.1:9050"
-
-# YouTube player clients to try in order (mobile/TV clients bypass bot detection better)
 YT_CLIENTS = ["ios", "android_vr", "tv_embedded", "web_creator"]
 
 def _yt_opts(extra: dict = None) -> dict:
-    """yt-dlp options for YouTube — uses Tor proxy + mobile clients."""
+    """yt-dlp options for YouTube with mobile client fallbacks."""
     opts = {
         "quiet": True,
         "no_color": True,
         "noplaylist": True,
-        "proxy": TOR_PROXY,
         "extractor_args": {
             "youtube": {
                 "player_client": YT_CLIENTS,
@@ -249,15 +244,21 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
                 done = 0
+                tick = 0
                 with open(filepath, "wb") as f:
                     for chunk in r.iter_content(chunk_size=65536):
                         if chunk:
                             f.write(chunk)
                             done += len(chunk)
+                            tick += 1
                             if total > 0:
                                 pct = 50 + round((done / total) * 45)
                                 jobs[job_id]["progress"] = min(pct, 95)
+                            else:
+                                # Unknown length — animate progress slowly up to 90
+                                jobs[job_id]["progress"] = min(50 + tick, 90)
             clean_name = filename.replace(f"_{job_id}", "")
+
 
         # ── YouTube/Other video via yt-dlp (mobile client for YouTube) ────────
         else:
