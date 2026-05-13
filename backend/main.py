@@ -40,109 +40,70 @@ if _cookie_content:
     _tmp.close()
     _COOKIE_FILE = _tmp.name
 
-# ── Cobalt API ────────────────────────────────────────────────────────────────
-COBALT_INSTANCES = [
-    os.environ.get("COBALT_API_URL", "").strip(),
-    "https://cobalt.peppe8o.com/",
-    "https://cobalt.q0.wtf/",
-    "https://api.cobalt.best/",
-]
-COBALT_INSTANCES = [url for url in COBALT_INSTANCES if url]
-
-COBALT_API_KEY = os.environ.get("COBALT_API_KEY", "").strip()
-
-def get_cobalt_headers():
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    }
-    if COBALT_API_KEY:
-        headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
-    return headers
+# ── RapidAPI YouTube Downloader ───────────────────────────────────────────────
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
+RAPIDAPI_HOST = "youtube-media-downloader.p.rapidapi.com"
 
 def is_youtube(url: str) -> bool:
     return "youtube.com" in url or "youtu.be" in url
 
-def clean_youtube_url(url: str) -> str:
-    """Extract clean video URL, removing playlist/tracking params."""
+def extract_youtube_id(url: str) -> str:
     match = re.search(r'(?:youtu\.be/|[?&]v=)([a-zA-Z0-9_-]{11})', url)
-    if match:
-        return f"https://www.youtube.com/watch?v={match.group(1)}"
-    return url
+    return match.group(1) if match else None
 
-def get_youtube_info_oembed(url: str, dl_type: str) -> dict:
-    """Get YouTube info via oEmbed (no auth, no bot detection)."""
-    oembed = req.get(
-        f"https://www.youtube.com/oembed?url={url}&format=json",
-        timeout=10
-    )
-    if not oembed.ok:
-        raise Exception("YouTube video bilgisi alınamadı (oEmbed)")
-    data = oembed.json()
+def get_youtube_info_rapidapi(url: str, dl_type: str) -> dict:
+    """Get YouTube info via RapidAPI."""
+    if not RAPIDAPI_KEY:
+        raise Exception("RAPIDAPI_KEY bulunamadı! Lütfen Render Dashboard'a ekleyin.")
+        
+    video_id = extract_youtube_id(url)
+    if not video_id:
+        raise Exception("Geçersiz YouTube URL'si")
 
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+    }
+    
+    resp = req.get(f"https://{RAPIDAPI_HOST}/v2/video/details", params={"videoId": video_id}, headers=headers, timeout=15)
+    if not resp.ok:
+        raise Exception(f"RapidAPI hatası: {resp.status_code} - {resp.text[:100]}")
+        
+    data = resp.json()
+    
+    formats = []
     if dl_type == "mp3":
-        formats = [{"format_id": "mp3", "ext": "mp3", "resolution": "Yüksek Kalite", "note": "Ses"}]
+        # Check audios
+        audios = data.get("audios", {"items": []}).get("items", [])
+        if audios:
+            best_audio = sorted(audios, key=lambda x: int(x.get("bitrate", 0)), reverse=True)[0]
+            formats.append({"format_id": best_audio["url"], "ext": "mp3", "resolution": "Yüksek Kalite", "note": "Ses"})
     else:
-        formats = [
-            {"format_id": "1080", "ext": "mp4", "resolution": "1080p", "note": "FHD"},
-            {"format_id": "720",  "ext": "mp4", "resolution": "720p",  "note": "HD"},
-            {"format_id": "480",  "ext": "mp4", "resolution": "480p",  "note": "SD"},
-        ]
+        # Check videos
+        videos = data.get("videos", {"items": []}).get("items", [])
+        if videos:
+            for v in videos:
+                if v.get("hasAudio"):
+                    height = v.get("height", 0)
+                    formats.append({
+                        "format_id": v["url"],
+                        "ext": "mp4",
+                        "resolution": f"{height}p",
+                        "note": "Video"
+                    })
+            if not formats:
+                formats.append({"format_id": videos[0]["url"], "ext": "mp4", "resolution": "Standart", "note": "Video"})
+
     return {
-        "title":     data.get("title", "Unknown"),
-        "thumbnail": data.get("thumbnail_url", ""),
-        "duration":  0,
-        "platform":  "youtube",
-        "formats":   formats,
+        "title": data.get("title", "Unknown"),
+        "thumbnail": data.get("thumbnails", [{"url": ""}])[0]["url"],
+        "duration": data.get("lengthSeconds", 0),
+        "platform": "youtube",
+        "formats": formats
     }
 
-def get_cobalt_url(url: str, quality: str, dl_type: str) -> str:
-    """Call Cobalt API to get a direct download URL."""
-    # Clean YouTube URLs (remove playlist params that break Cobalt)
-    if is_youtube(url):
-        url = clean_youtube_url(url)
 
-    if dl_type == "mp3":
-        payload = {
-            "url": url,
-            "downloadMode": "audio",
-            "audioFormat": "mp3",
-            "audioQuality": "320",
-        }
-    else:
-        payload = {
-            "url": url,
-            "downloadMode": "auto",
-            "videoQuality": quality,
-            "filenameStyle": "basic",
-        }
 
-    last_err = None
-    for api_url in COBALT_INSTANCES:
-        api_endpoint = api_url.rstrip("/") + "/"
-        try:
-            resp = req.post(api_endpoint, json=payload, headers=get_cobalt_headers(), timeout=15)
-            if resp.ok:
-                data = resp.json()
-                status = data.get("status")
-                
-                if status in ("redirect", "tunnel"):
-                    return data["url"]
-                elif status == "picker":
-                    return data["picker"][0]["url"]
-                else:
-                    err = data.get("error", {})
-                    raise Exception(f"Cobalt hatası: {err.get('code', str(data))}")
-            else:
-                last_err = f"API hatası ({resp.status_code}): {resp.text[:100]}"
-                if resp.status_code == 400 and "auth" in resp.text.lower():
-                    continue # Auth istiyorsa diğer instance'a geç
-        except Exception as e:
-            last_err = str(e)
-            continue # Hata varsa diğerine geç
-
-    raise Exception(f"Tüm Cobalt sunucuları denendi, başarısız: {last_err}")
 
 def _base_ydl_opts() -> dict:
     opts = {
@@ -193,10 +154,10 @@ def get_video_info(req_body: VideoRequest):
     url = req_body.url
     dl_type = req_body.type
 
-    # YouTube: use oEmbed to avoid bot detection
+    # YouTube: use RapidAPI
     if is_youtube(url):
         try:
-            return get_youtube_info_oembed(url, dl_type)
+            return get_youtube_info_rapidapi(url, dl_type)
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -241,21 +202,17 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
         os.makedirs("./downloads", exist_ok=True)
         filepath = None
 
-        # YouTube & Cobalt-compatible: use Cobalt API
-        cobalt_quality = format_id if format_id in ("mp3", "1080", "720", "480") else None
-
-        if cobalt_quality or is_youtube(url):
-            quality = cobalt_quality or ("mp3" if dl_type == "mp3" else "1080")
-            jobs[job_id]["progress"] = 10
-            cobalt_url = get_cobalt_url(url, quality, dl_type)
+        # YouTube: format_id is the direct download URL from RapidAPI
+        if is_youtube(url):
             jobs[job_id]["progress"] = 20
+            direct_url = format_id
 
             ext = "mp3" if dl_type == "mp3" else "mp4"
             filename = f"vidfetch_{job_id}.{ext}"
             filepath = f"./downloads/{filename}"
 
-            # Stream download from Cobalt URL
-            with req.get(cobalt_url, stream=True, timeout=120) as r:
+            # Stream download from RapidAPI URL
+            with req.get(direct_url, stream=True, timeout=120) as r:
                 r.raise_for_status()
                 total = int(r.headers.get("content-length", 0))
                 downloaded = 0
