@@ -2,6 +2,17 @@ import { useState } from 'react'
 import './index.css'
 
 const API = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'
+const LOCAL_API = import.meta.env.VITE_LOCAL_API_URL ?? ''  // Local backend for YouTube MP4
+
+function isYouTube(url: string) {
+  return url.includes('youtube.com') || url.includes('youtu.be')
+}
+
+function getApiBase(url: string, type: string) {
+  // YouTube video → use local backend if configured
+  if (isYouTube(url) && type === 'mp4' && LOCAL_API) return LOCAL_API
+  return API
+}
 
 interface VideoFormat {
   format_id: string
@@ -103,21 +114,30 @@ function App() {
     if (!url.trim()) return
     setLoading(true); setError(''); setInfo(null)
     try {
-      const res = await fetch(`${API}/api/info`, {
+      const apiBase = getApiBase(url, downloadType)
+      const res = await fetch(`${apiBase}/api/info`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, type: downloadType }),
       })
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Video bilgisi alınamadı') }
       setInfo(await res.json())
-    } catch (err: any) { setError(err.message) }
+    } catch (err: any) {
+      // If YouTube MP4 + local backend not reachable, show helpful message
+      if (isYouTube(url) && downloadType === 'mp4' && LOCAL_API) {
+        setError('Yerel backend çalışmıyor. baslat.bat dosyasını çalıştırın, sonra tekrar deneyin.')
+      } else {
+        setError(err.message)
+      }
+    }
     finally { setLoading(false) }
   }
 
   const handleDownload = async (format_id: string) => {
     setDownloading(true); setDownloadProgress(0); setDownloadStatus('Başlatılıyor...')
+    const apiBase = getApiBase(url, downloadType)
     try {
-      const startRes = await fetch(`${API}/api/download/start`, {
+      const startRes = await fetch(`${apiBase}/api/download/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, format_id, type: downloadType }),
@@ -126,7 +146,7 @@ function App() {
       const { job_id } = await startRes.json()
 
       await new Promise<void>((resolve, reject) => {
-        const es = new EventSource(`${API}/api/download/progress/${job_id}`)
+        const es = new EventSource(`${apiBase}/api/download/progress/${job_id}`)
         es.onmessage = (e) => {
           const d = JSON.parse(e.data)
           setDownloadProgress(d.progress)
@@ -139,7 +159,7 @@ function App() {
         es.onerror = () => { es.close(); reject(new Error('Sunucu bağlantısı kesildi')) }
       })
 
-      window.location.href = `${API}/api/download/file/${job_id}`
+      window.location.href = `${apiBase}/api/download/file/${job_id}`
       setTimeout(() => { setDownloading(false); setDownloadProgress(0); setDownloadStatus('') }, 2000)
     } catch (err: any) {
       setError(err.message); setDownloading(false); setDownloadProgress(0); setDownloadStatus('')
