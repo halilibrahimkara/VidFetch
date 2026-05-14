@@ -22,6 +22,14 @@ _log = logging.getLogger("uvicorn.error")
 _FFMPEG_EXE = shutil.which("ffmpeg")
 FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE) if _FFMPEG_EXE else ""
 
+# Çıkış proxy (Render/VPS IP sık kalıcı bloklanır; çerez yetmeyebilir)
+_YTDLP_PROXY = (
+    os.environ.get("YTDLP_PROXY", "").strip()
+    or os.environ.get("ALL_PROXY", "").strip()
+    or os.environ.get("HTTPS_PROXY", "").strip()
+    or os.environ.get("HTTP_PROXY", "").strip()
+)
+
 # ── Cookies (YouTube bot / giriş ekranı için) ─────────────────────────────────
 _COOKIE_FILE = None
 _COOKIES_FROM_BROWSER = None
@@ -138,6 +146,21 @@ def _yt_merge_format(cap_h: int) -> str:
     )
 
 
+def _youtube_jobs_error_hint(msg: str) -> str:
+    low = msg.lower()
+    if "youtube" not in low:
+        return msg
+    if "sign in" not in low and "not a bot" not in low:
+        return msg
+    if _YTDLP_PROXY:
+        return msg
+    return (
+        f"{msg} | YouTube sık sık VPS/DC çıkış IP'sini bloklar (çerez doğru da olsa). "
+        "Render'da HTTPS_PROXY/YTDLP_PROXY ile rezidans proxy deneyin veya "
+        "https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide"
+    )
+
+
 def _youtube_err_recoverable(msg: str) -> bool:
     s = msg.lower()
     needles = ("sign in", "not a bot", "login required", "--cookies-from-browser", "authentication")
@@ -222,6 +245,8 @@ def _yt_opts(
     }
     if FFMPEG_BIN:
         opts["ffmpeg_location"] = FFMPEG_BIN
+    if _YTDLP_PROXY:
+        opts["proxy"] = _YTDLP_PROXY
     if pass_cookies:
         if _COOKIES_FROM_BROWSER:
             opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
@@ -236,6 +261,8 @@ def _base_ydl_opts() -> dict:
     opts = {"quiet": True, "no_color": True, "noplaylist": True}
     if FFMPEG_BIN:
         opts["ffmpeg_location"] = FFMPEG_BIN
+    if _YTDLP_PROXY:
+        opts["proxy"] = _YTDLP_PROXY
     if _COOKIES_FROM_BROWSER:
         opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
     elif _COOKIE_FILE:
@@ -299,6 +326,7 @@ def root():
             else (["webpage"] if _HAS_YT_COOKIES else [])
         ),
         "youtube_extractor_retry_attempts": len(_youtube_extractor_retry_chain()),
+        "youtube_downstream_proxy": bool(_YTDLP_PROXY),
     }
 
 
@@ -533,7 +561,7 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
         jobs[job_id].update({"status": "done", "progress": 100,
                               "filepath": filepath, "filename": clean_name})
     except Exception as e:
-        jobs[job_id].update({"status": "error", "error": str(e)})
+        jobs[job_id].update({"status": "error", "error": _youtube_jobs_error_hint(str(e))})
 
 
 @app.post("/api/download/start")
