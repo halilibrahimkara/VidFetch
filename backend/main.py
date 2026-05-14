@@ -92,14 +92,20 @@ def extract_youtube_id(url: str) -> str:
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
-# android: bazı içeriklere uygun kalite · web için imza çözümü Docker'da Node gerekir
-# Çerez varken web önde: oturum + "bot doğrula" ile uyumu artırır
-_YT_PC_NO_AUTH = ["android", "android_vr", "ios", "web_creator", "web"]
-_YT_PC_WITH_AUTH = ["web", "android", "android_vr", "ios", "web_creator"]
+# android_vr: birçok müzik klibinde GVS için PO şartı yok · web_safari: bazı akışlar HLS (wiki karşılaştırması)
+# NOT: VPS IP'de sırayı "web" ile başlatmak LOGIN_REQUIRED ("bot doğrula") daha sık tetikliyor — çerez doğru da olsa
+_YT_PLAYERS_ENV = os.environ.get("YOUTUBE_PLAYER_CLIENTS", "").strip()
+_YT_PO_TOKEN = os.environ.get("YOUTUBE_PO_TOKEN", "").strip()
 
 
 def _youtube_player_clients() -> list:
-    return list(_YT_PC_WITH_AUTH if _HAS_YT_COOKIES else _YT_PC_NO_AUTH)
+    if _YT_PLAYERS_ENV:
+        return [
+            p.strip()
+            for p in re.split(r"[\s,]+", _YT_PLAYERS_ENV)
+            if p.strip()
+        ]
+    return ["android_vr", "android", "ios", "web_creator", "web_safari", "web"]
 
 
 def _yt_merge_format(cap_h: int) -> str:
@@ -119,16 +125,18 @@ def _yt_merge_format(cap_h: int) -> str:
 
 def _yt_opts(extra: dict = None) -> dict:
     """yt-dlp options for YouTube with mobile client fallbacks."""
+    ext_yt = {
+        "player_client": _youtube_player_clients(),
+        "skip": ["translated_subs"],
+    }
+    if _YT_PO_TOKEN:
+        ext_yt["po_token"] = _YT_PO_TOKEN
     opts = {
         "quiet": True,
         "no_color": True,
         "noplaylist": True,
         "extractor_args": {
-            "youtube": {
-                "player_client": _youtube_player_clients(),
-                # dash atlanırsa bazı ortamlarda ayrı ses+görüntü akışları kayboluyor
-                "skip": ["translated_subs"],
-            }
+            "youtube": ext_yt,
         },
     }
     if FFMPEG_BIN:
@@ -176,7 +184,13 @@ def cleanup_file(fp: str):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "ffmpeg": FFMPEG_BIN, "youtube_auth_cookies": _HAS_YT_COOKIES}
+    return {
+        "status": "ok",
+        "ffmpeg": FFMPEG_BIN,
+        "youtube_auth_cookies": _HAS_YT_COOKIES,
+        "youtube_player_clients_override": bool(_YT_PLAYERS_ENV),
+        "youtube_po_token_set": bool(_YT_PO_TOKEN),
+    }
 
 @app.post("/api/info")
 def get_video_info(req_body: VideoRequest):
