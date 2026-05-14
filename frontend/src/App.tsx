@@ -117,7 +117,10 @@ function App() {
       const apiBase = getApiBase(url, downloadType)
       const res = await fetch(`${apiBase}/api/info`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Bypass-Tunnel-Reminder': 'true'
+        },
         body: JSON.stringify({ url, type: downloadType }),
       })
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Video bilgisi alınamadı') }
@@ -139,7 +142,10 @@ function App() {
     try {
       const startRes = await fetch(`${apiBase}/api/download/start`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Bypass-Tunnel-Reminder': 'true'
+        },
         body: JSON.stringify({ url, format_id, type: downloadType }),
       })
       if (!startRes.ok) throw new Error('İndirme başlatılamadı')

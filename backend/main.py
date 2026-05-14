@@ -58,27 +58,28 @@ def get_youtube_mp3_url(video_id: str) -> str:
                 if r.ok:
                     d = r.json()
                     if d.get("status") == "ok":
-                        link = d["link"]
+                        link = d.get("link", "")
+                        if not link:
+                            break # Empty link, retry cycle
                         # Validate the CDN link is actually alive
                         try:
                             check = req.head(link, timeout=10, allow_redirects=True)
                             if check.status_code < 400:
                                 return link
-                            # Stale/expired cached URL — force re-conversion by waiting
                         except Exception:
                             pass
                         # URL is dead, break inner loop and retry conversion
                         break
                     if d.get("status") == "fail":
-                        raise Exception(f"MP3 hatasi: {d.get('msg','bilinmiyor')}")
-                    # status == "processing" — keep polling
-            except Exception as e:
-                if "hatasi" in str(e):
-                    raise
+                        # If fail, don't crash immediately, let it retry in next cycle
+                        break
+            except Exception:
+                pass # Ignore connection errors during poll and just retry
             time.sleep(3)
         # Wait before next conversion cycle
         time.sleep(5)
-    raise Exception("MP3 donusumu basarisiz oldu (CDN linki surekli gecersiz)")
+    raise Exception("MP3 donusumu basarisiz oldu (Zaman asimi veya gecersiz link)")
+
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
 YT_CLIENTS = ["ios", "android_vr", "tv_embedded", "web_creator"]
