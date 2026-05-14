@@ -138,8 +138,13 @@ def _yt_merge_format(cap_h: int) -> str:
     )
 
 
-def _yt_opts(extra: dict = None) -> dict:
-    """yt-dlp options for YouTube with mobile client fallbacks."""
+def _youtube_err_recoverable(msg: str) -> bool:
+    s = msg.lower()
+    needles = ("sign in", "not a bot", "login required", "--cookies-from-browser", "authentication")
+    return any(n in s for n in needles)
+
+
+def _default_youtube_extractor_dict() -> dict:
     ext_yt = {
         "player_client": _youtube_player_clients(),
         "skip": ["translated_subs"],
@@ -154,6 +159,59 @@ def _yt_opts(extra: dict = None) -> dict:
         ext_yt["player_skip"] = ["webpage"]
     if _YT_PO_TOKEN:
         ext_yt["po_token"] = _YT_PO_TOKEN
+    return ext_yt
+
+
+def _youtube_extractor_retry_chain() -> list[tuple[dict, bool]]:
+    """
+    (youtube extractor kwargs, pass_cookies) — datacenter blokları için sırayla dene.
+    """
+    po_kw = {}
+    if _YT_PO_TOKEN:
+        po_kw = {"po_token": _YT_PO_TOKEN}
+
+    clients = list(_youtube_player_clients())
+    out: list[tuple[dict, bool]] = []
+    seen_sig: set[tuple[str, bool]] = set()
+
+    def _add(ext: dict, cookies: bool) -> None:
+        sig = (json.dumps(ext, sort_keys=True), cookies)
+        if sig in seen_sig:
+            return
+        seen_sig.add(sig)
+        out.append((dict(ext), cookies))
+
+    # 1) Ortam değişkenlerine göre varsayılan (çerez + player_skip vb.)
+    _add(_default_youtube_extractor_dict(), True)
+
+    # 2) Çerezliyken tam watch sayfası (player_skip kapalı — bazı oturumlarda VPS'te gerekebiliyor)
+    if _HAS_YT_COOKIES and not _YT_PLAYER_SKIP_ENV:
+        _add({"player_client": clients, "skip": ["translated_subs"], **po_kw}, True)
+
+    # 3–6) android_vr + çeşitli cookie kombinasyonları
+    vr_base = {"player_client": ["android_vr"], "skip": ["translated_subs"], **po_kw}
+    _add({**vr_base, "player_skip": ["webpage"]}, True)
+    _add({**vr_base}, True)
+
+    vr_guest_page = {"player_client": ["android_vr"], "skip": ["translated_subs"], **po_kw, "player_skip": ["webpage"]}
+    _add(vr_guest_page, False)
+    _add(dict(vr_base), False)
+
+    return out
+
+
+def _yt_opts(
+    extra: dict | None = None,
+    *,
+    youtube_extractor: dict | None = None,
+    pass_cookies: bool = True,
+):
+    """yt-dlp seçenekleri; youtube_extractor verilirse varsayılan YouTube blok yerine kullanılır."""
+    ext_yt = (
+        youtube_extractor
+        if youtube_extractor is not None
+        else _default_youtube_extractor_dict()
+    )
     opts = {
         "quiet": True,
         "no_color": True,
@@ -164,10 +222,11 @@ def _yt_opts(extra: dict = None) -> dict:
     }
     if FFMPEG_BIN:
         opts["ffmpeg_location"] = FFMPEG_BIN
-    if _COOKIES_FROM_BROWSER:
-        opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
-    elif _COOKIE_FILE:
-        opts["cookiefile"] = _COOKIE_FILE
+    if pass_cookies:
+        if _COOKIES_FROM_BROWSER:
+            opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
+        elif _COOKIE_FILE:
+            opts["cookiefile"] = _COOKIE_FILE
     if extra:
         opts.update(extra)
     return opts
@@ -239,6 +298,7 @@ def root():
             if _YT_PLAYER_SKIP_ENV
             else (["webpage"] if _HAS_YT_COOKIES else [])
         ),
+        "youtube_extractor_retry_attempts": len(_youtube_extractor_retry_chain()),
     }
 
 
@@ -267,10 +327,31 @@ def get_video_info(req_body: VideoRequest):
                               "resolution": "Yuksek Kalite", "note": "Ses"}]
             }
 
-        # Video: extract info with mobile client
+        # Video: extract info with yt-dlp ( sırayla farklı istemci/çerez kombinasyonu )
         try:
-            with yt_dlp.YoutubeDL(_yt_opts({"skip_download": True})) as ydl:
-                info = ydl.extract_info(url, download=False)
+            info = None
+            last_err = None
+            for yt_ext, cookie_ok in _youtube_extractor_retry_chain():
+                try:
+                    with yt_dlp.YoutubeDL(
+                        _yt_opts(
+                            {"skip_download": True},
+                            youtube_extractor=yt_ext,
+                            pass_cookies=cookie_ok,
+                        )
+                    ) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                    break
+                except Exception as ei:
+                    last_err = ei
+                    if _youtube_err_recoverable(str(ei)):
+                        continue
+                    raise HTTPException(status_code=500, detail=str(ei)) from ei
+            if info is None:
+                raise HTTPException(
+                    status_code=500,
+                    detail=str(last_err) if last_err else "YouTube bilgisi alinamadi",
+                )
 
             formats = []
             max_h = max(
@@ -345,20 +426,34 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
                 elif d["status"] == "finished":
                     jobs[job_id]["progress"] = 95
 
-            ydl_opts = {
-                **_yt_opts(),
-                "format": "bestaudio[ext=m4a]/bestaudio/ba/b",
-                "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
-                "progress_hooks": [hook],
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }]
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(url, download=True)
+            last_exc = None
+            for yt_ext, cookie_ok in _youtube_extractor_retry_chain():
+                try:
+                    ydl_opts = {
+                        **_yt_opts(
+                            youtube_extractor=yt_ext,
+                            pass_cookies=cookie_ok,
+                        ),
+                        "format": "bestaudio[ext=m4a]/bestaudio/ba/b",
+                        "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
+                        "progress_hooks": [hook],
+                        "postprocessors": [{
+                            "key": "FFmpegExtractAudio",
+                            "preferredcodec": "mp3",
+                            "preferredquality": "192",
+                        }],
+                    }
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        ydl.extract_info(url, download=True)
+                    break
+                except Exception as ei:
+                    last_exc = ei
+                    if _youtube_err_recoverable(str(ei)):
+                        continue
+                    raise
+            else:
+                if last_exc:
+                    raise last_exc
 
             files = glob.glob(f"./downloads/{job_id}_*")
             if not files:
@@ -367,7 +462,7 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
             clean_name = os.path.basename(filepath).replace(f"{job_id}_", "")
 
 
-        # ── YouTube/Other video via yt-dlp (mobile client for YouTube) ────────
+        # ── YouTube mp4/other veya diğer platformlar ──────────────────────────
         else:
             def hook(d):
                 if d["status"] == "downloading":
@@ -378,23 +473,56 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
                 elif d["status"] == "finished":
                     jobs[job_id]["progress"] = 95
 
-            base = _yt_opts() if is_youtube(url) else _base_ydl_opts()
-            ydl_opts = {
-                **base,
-                "format": format_id,
-                "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
-                "progress_hooks": [hook],
-                "merge_output_format": "mp4" if dl_type == "mp4" else None,
-            }
-            if dl_type == "mp3":
-                ydl_opts["postprocessors"] = [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }]
+            if is_youtube(url):
+                last_exc = None
+                for yt_ext, cookie_ok in _youtube_extractor_retry_chain():
+                    try:
+                        base = _yt_opts(
+                            youtube_extractor=yt_ext,
+                            pass_cookies=cookie_ok,
+                        )
+                        ydl_opts = {
+                            **base,
+                            "format": format_id,
+                            "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
+                            "progress_hooks": [hook],
+                            "merge_output_format": "mp4" if dl_type == "mp4" else None,
+                        }
+                        if dl_type == "mp3":
+                            ydl_opts["postprocessors"] = [{
+                                "key": "FFmpegExtractAudio",
+                                "preferredcodec": "mp3",
+                                "preferredquality": "192",
+                            }]
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(url, download=True)
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            ydl.extract_info(url, download=True)
+                        break
+                    except Exception as ei:
+                        last_exc = ei
+                        if _youtube_err_recoverable(str(ei)):
+                            continue
+                        raise
+                else:
+                    if last_exc:
+                        raise last_exc
+            else:
+                ydl_opts = {
+                    **_base_ydl_opts(),
+                    "format": format_id,
+                    "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
+                    "progress_hooks": [hook],
+                    "merge_output_format": "mp4" if dl_type == "mp4" else None,
+                }
+                if dl_type == "mp3":
+                    ydl_opts["postprocessors"] = [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }]
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(url, download=True)
 
             files = glob.glob(f"./downloads/{job_id}_*")
             if not files:
