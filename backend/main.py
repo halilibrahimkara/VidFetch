@@ -18,18 +18,33 @@ import requests as req
 _FFMPEG_EXE = shutil.which("ffmpeg")
 FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE) if _FFMPEG_EXE else ""
 
-# ── Cookies (yt-dlp fallback) ─────────────────────────────────────────────────
+# ── Cookies (YouTube bot / giriş ekranı için) ─────────────────────────────────
 _COOKIE_FILE = None
-_cookie_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
-if _cookie_b64:
-    import base64 as _b64
-    try:
-        _cc = _b64.b64decode(_cookie_b64).decode("utf-8")
-        _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-        _tmp.write(_cc); _tmp.close()
-        _COOKIE_FILE = _tmp.name
-    except Exception:
-        pass
+_COOKIES_FROM_BROWSER = None
+
+_cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
+if _cookie_path:
+    _cp = os.path.expanduser(os.path.expandvars(_cookie_path))
+    if os.path.isfile(_cp):
+        _COOKIE_FILE = os.path.abspath(_cp)
+
+_browser = os.environ.get("YOUTUBE_COOKIES_FROM_BROWSER", "").strip()
+if _browser:
+    parts = [p.strip() for p in _browser.split(",") if p.strip()]
+    if parts:
+        _COOKIES_FROM_BROWSER = tuple(parts)
+
+if not _COOKIE_FILE and not _COOKIES_FROM_BROWSER:
+    _cookie_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+    if _cookie_b64:
+        import base64 as _b64
+        try:
+            _cc = _b64.b64decode(_cookie_b64).decode("utf-8")
+            _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
+            _tmp.write(_cc); _tmp.close()
+            _COOKIE_FILE = _tmp.name
+        except Exception:
+            pass
 
 # ── RapidAPI (MP3 only via youtube-mp36) ─────────────────────────────────────
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
@@ -44,7 +59,22 @@ def extract_youtube_id(url: str) -> str:
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
-YT_CLIENTS = ["ios", "android_vr", "tv_embedded", "web_creator"]
+# web: bazı sunucularda / IP’lerde yalnızca mobil istemciler kalırsa birleştirilmiş
+# kalite seçilemez; çerezle “web” yedek format üretir. tv_embedded artık desteklenmiyor.
+YT_CLIENTS = ["ios", "android_vr", "web_creator", "web"]
+
+
+def _yt_merge_format(cap_h: int) -> str:
+    """yükseklik tavanı için birleştirme; eşleşmezse daha gevşek yedeklere düşer."""
+    return "/".join(
+        [
+            f"bestvideo[height<={cap_h}]+bestaudio",
+            f"best[height<={cap_h}]",
+            "bestvideo+bestaudio",
+            "best",
+        ]
+    )
+
 
 def _yt_opts(extra: dict = None) -> dict:
     """yt-dlp options for YouTube with mobile client fallbacks."""
@@ -55,13 +85,16 @@ def _yt_opts(extra: dict = None) -> dict:
         "extractor_args": {
             "youtube": {
                 "player_client": YT_CLIENTS,
-                "skip": ["dash", "translated_subs"],
+                # dash atlanırsa bazı ortamlarda ayrı ses+görüntü akışları kayboluyor
+                "skip": ["translated_subs"],
             }
         },
     }
     if FFMPEG_BIN:
         opts["ffmpeg_location"] = FFMPEG_BIN
-    if _COOKIE_FILE:
+    if _COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
+    elif _COOKIE_FILE:
         opts["cookiefile"] = _COOKIE_FILE
     if extra:
         opts.update(extra)
@@ -72,7 +105,9 @@ def _base_ydl_opts() -> dict:
     opts = {"quiet": True, "no_color": True, "noplaylist": True}
     if FFMPEG_BIN:
         opts["ffmpeg_location"] = FFMPEG_BIN
-    if _COOKIE_FILE:
+    if _COOKIES_FROM_BROWSER:
+        opts["cookiesfrombrowser"] = _COOKIES_FROM_BROWSER
+    elif _COOKIE_FILE:
         opts["cookiefile"] = _COOKIE_FILE
     return opts
 
@@ -138,14 +173,14 @@ def get_video_info(req_body: VideoRequest):
                 if f.get("vcodec") != "none"
             ) if info.get("formats") else 0
 
-            for h, note, fid in [
-                (1080, "FHD", "bestvideo[height<=1080]+bestaudio/best[height<=1080]"),
-                (720,  "HD",  "bestvideo[height<=720]+bestaudio/best[height<=720]"),
-                (480,  "SD",  "bestvideo[height<=480]+bestaudio/best[height<=480]"),
-                (360,  "SD",  "bestvideo[height<=360]+bestaudio/best[height<=360]"),
+            for h, note in [
+                (1080, "FHD"),
+                (720, "HD"),
+                (480, "SD"),
+                (360, "SD"),
             ]:
                 if max_h >= h:
-                    formats.append({"format_id": fid, "ext": "mp4",
+                    formats.append({"format_id": _yt_merge_format(h), "ext": "mp4",
                                     "resolution": f"{h}p", "note": note})
             if not formats:
                 formats.append({"format_id": "best", "ext": "mp4",
@@ -174,10 +209,10 @@ def get_video_info(req_body: VideoRequest):
                 (f.get("height", 0) or 0) for f in info.get("formats", [])
                 if f.get("vcodec") != "none"
             ) if info.get("formats") else 0
-            for h, note in [(1080,"FHD"),(720,"HD"),(480,"SD")]:
+            for h, note in [(1080,"FHD"),(720,"HD"),(480,"SD"),(360,"SD")]:
                 if max_h >= h:
                     formats.append({
-                        "format_id": f"bestvideo[height<={h}]+bestaudio/best[height<={h}]",
+                        "format_id": _yt_merge_format(h),
                         "ext": "mp4", "resolution": f"{h}p", "note": note})
             if not formats:
                 formats.append({"format_id": "best", "ext": "mp4",
@@ -207,7 +242,7 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
 
             ydl_opts = {
                 **_yt_opts(),
-                "format": "bestaudio/best", # Download best audio
+                "format": "bestaudio[ext=m4a]/bestaudio/ba/b",
                 "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
                 "progress_hooks": [hook],
                 "postprocessors": [{
