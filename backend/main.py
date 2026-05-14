@@ -42,43 +42,49 @@ def extract_youtube_id(url: str) -> str:
     return m.group(1) if m else None
 
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
+# ── Cobalt API (Robust MP3 Fallback) ─────────────────────────────────────────
+COBALT_INSTANCES = [
+    "https://api.cobalt.tools",           # Official (might have strict CORS/bot blocks)
+    "https://cobalt.api.timelessnesses.me", # Popular fallback
+    "https://cobalt.cues.sg",             # Fallback
+    "https://co.wuk.sh",                  # Fallback
+    "https://api.cobalt.best"             # Fallback
+]
+
 def get_youtube_mp3_url(video_id: str) -> str:
-    if not RAPIDAPI_KEY:
-        raise Exception("RAPIDAPI_KEY eksik! Render Environment'a ekleyin.")
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "youtube-mp36.p.rapidapi.com",
+    """Gets direct MP3 download URL using multiple public Cobalt instances."""
+    payload = {
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+        "isAudioOnly": True,
+        "aFormat": "mp3"
     }
-    # Try up to 3 full conversion cycles (in case cached URL is stale/expired)
-    for cycle in range(3):
-        for _ in range(40):  # poll ~2 min per cycle
-            try:
-                r = req.get("https://youtube-mp36.p.rapidapi.com/dl",
-                            params={"id": video_id}, headers=headers, timeout=30)
-                if r.ok:
-                    d = r.json()
-                    if d.get("status") == "ok":
-                        link = d.get("link", "")
-                        if not link:
-                            break # Empty link, retry cycle
-                        # Validate the CDN link is actually alive (Use GET instead of HEAD)
-                        try:
-                            with req.get(link, stream=True, timeout=10, allow_redirects=True) as check:
-                                if check.status_code < 400:
-                                    return link
-                        except Exception:
-                            pass
-                        # URL is dead, break inner loop and retry conversion
-                        break
-                    if d.get("status") == "fail":
-                        # If fail, don't crash immediately, let it retry in next cycle
-                        break
-            except Exception:
-                pass # Ignore connection errors during poll and just retry
-            time.sleep(3)
-        # Wait before next conversion cycle
-        time.sleep(5)
-    raise Exception("MP3 donusumu basarisiz oldu (Zaman asimi veya gecersiz link)")
+    
+    last_err = ""
+    for instance in COBALT_INSTANCES:
+        # For v10 (new) cobalt APIs
+        api_url = f"{instance}/api/json" if "api.cobalt.tools" not in instance else f"{instance}/"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        try:
+            r = req.post(api_url, json=payload, headers=headers, timeout=15)
+            if r.ok:
+                data = r.json()
+                # If API returns a direct URL
+                if "url" in data and data["url"]:
+                    return data["url"]
+                # Some v10 APIs return {"status": "stream", "url": "..."}
+                if data.get("status") in ["stream", "redirect", "success"] and "url" in data:
+                    return data["url"]
+            last_err = f"{instance} donus kodu: {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+            continue
+            
+    raise Exception(f"Hicbir Cobalt sunucusu MP3'e donusturemedi. Son hata: {last_err[:100]}")
+
 
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
