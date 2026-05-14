@@ -79,6 +79,20 @@ _HAS_YT_COOKIES = bool(_COOKIE_FILE or _COOKIES_FROM_BROWSER)
 if os.environ.get("YOUTUBE_COOKIES_B64", "").strip() and not _HAS_YT_COOKIES:
     _log.warning("YOUTUBE_COOKIES_B64 set but decoding failed — YouTube bot errors likely.")
 
+# yt-dlp: is_authenticated için LOGIN_INFO + (SAPISID veya Secure-*PAPISID) gerekli (_base.py)
+_YT_COOKIE_AUDIT = {"bytes": None, "has_login_info": False, "has_sapisid_family": False}
+if _COOKIE_FILE and os.path.isfile(_COOKIE_FILE):
+    try:
+        _YT_COOKIE_AUDIT["bytes"] = os.path.getsize(_COOKIE_FILE)
+        _blob = open(_COOKIE_FILE, encoding="utf-8", errors="replace").read()
+        _YT_COOKIE_AUDIT["has_login_info"] = "LOGIN_INFO" in _blob and ".youtube.com" in _blob
+        _YT_COOKIE_AUDIT["has_sapisid_family"] = any(
+            p in _blob
+            for p in ("\tSAPISID\t", "\t__Secure-1PAPISID\t", "\t__Secure-3PAPISID\t")
+        )
+    except OSError:
+        pass
+
 # ── RapidAPI (MP3 only via youtube-mp36) ─────────────────────────────────────
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
 
@@ -96,6 +110,7 @@ def extract_youtube_id(url: str) -> str:
 # NOT: VPS IP'de sırayı "web" ile başlatmak LOGIN_REQUIRED ("bot doğrula") daha sık tetikliyor — çerez doğru da olsa
 _YT_PLAYERS_ENV = os.environ.get("YOUTUBE_PLAYER_CLIENTS", "").strip()
 _YT_PO_TOKEN = os.environ.get("YOUTUBE_PO_TOKEN", "").strip()
+_YT_PLAYER_SKIP_ENV = os.environ.get("YOUTUBE_PLAYER_SKIP", "").strip()
 
 
 def _youtube_player_clients() -> list:
@@ -129,6 +144,14 @@ def _yt_opts(extra: dict = None) -> dict:
         "player_client": _youtube_player_clients(),
         "skip": ["translated_subs"],
     }
+    if _YT_PLAYER_SKIP_ENV:
+        ext_yt["player_skip"] = [
+            x.strip()
+            for x in re.split(r"[\s,]+", _YT_PLAYER_SKIP_ENV)
+            if x.strip()
+        ]
+    elif _HAS_YT_COOKIES:
+        ext_yt["player_skip"] = ["webpage"]
     if _YT_PO_TOKEN:
         ext_yt["po_token"] = _YT_PO_TOKEN
     opts = {
@@ -182,15 +205,42 @@ def cleanup_file(fp: str):
     except Exception:
         pass
 
+if _HAS_YT_COOKIES and _COOKIE_FILE:
+    if not (
+        _YT_COOKIE_AUDIT.get("has_login_info")
+        and _YT_COOKIE_AUDIT.get("has_sapisid_family")
+    ):
+        _log.warning(
+            "YouTube cookies lack LOGIN_INFO/SAPISID pair yt-dlp needs; re-export cookies on youtube.com "
+            "(Get cookies.txt LOCALLY)."
+        )
+
+
 @app.get("/")
 def root():
+    sid_ok = (
+        None
+        if _COOKIES_FROM_BROWSER and not (_COOKIE_FILE and os.path.isfile(_COOKIE_FILE))
+        else bool(
+            _YT_COOKIE_AUDIT.get("has_login_info")
+            and _YT_COOKIE_AUDIT.get("has_sapisid_family")
+        )
+    )
     return {
         "status": "ok",
         "ffmpeg": FFMPEG_BIN,
         "youtube_auth_cookies": _HAS_YT_COOKIES,
+        "youtube_sid_cookies_complete": sid_ok,
+        "youtube_cookie_file_bytes": _YT_COOKIE_AUDIT.get("bytes"),
         "youtube_player_clients_override": bool(_YT_PLAYERS_ENV),
         "youtube_po_token_set": bool(_YT_PO_TOKEN),
+        "youtube_player_skip": (
+            [x.strip() for x in re.split(r"[\s,]+", _YT_PLAYER_SKIP_ENV) if x.strip()]
+            if _YT_PLAYER_SKIP_ENV
+            else (["webpage"] if _HAS_YT_COOKIES else [])
+        ),
     }
+
 
 @app.post("/api/info")
 def get_video_info(req_body: VideoRequest):
