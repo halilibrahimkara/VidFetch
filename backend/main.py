@@ -61,11 +61,11 @@ def get_youtube_mp3_url(video_id: str) -> str:
                         link = d.get("link", "")
                         if not link:
                             break # Empty link, retry cycle
-                        # Validate the CDN link is actually alive
+                        # Validate the CDN link is actually alive (Use GET instead of HEAD)
                         try:
-                            check = req.head(link, timeout=10, allow_redirects=True)
-                            if check.status_code < 400:
-                                return link
+                            with req.get(link, stream=True, timeout=10, allow_redirects=True) as check:
+                                if check.status_code < 400:
+                                    return link
                         except Exception:
                             pass
                         # URL is dead, break inner loop and retry conversion
