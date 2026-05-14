@@ -42,50 +42,6 @@ def extract_youtube_id(url: str) -> str:
     return m.group(1) if m else None
 
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
-# ── Cobalt API (Robust MP3 Fallback) ─────────────────────────────────────────
-COBALT_INSTANCES = [
-    "https://api.cobalt.tools",           # Official (might have strict CORS/bot blocks)
-    "https://cobalt.api.timelessnesses.me", # Popular fallback
-    "https://cobalt.cues.sg",             # Fallback
-    "https://co.wuk.sh",                  # Fallback
-    "https://api.cobalt.best"             # Fallback
-]
-
-def get_youtube_mp3_url(video_id: str) -> str:
-    """Gets direct MP3 download URL using multiple public Cobalt instances."""
-    payload = {
-        "url": f"https://www.youtube.com/watch?v={video_id}",
-        "isAudioOnly": True,
-        "aFormat": "mp3"
-    }
-    
-    last_err = ""
-    for instance in COBALT_INSTANCES:
-        # For v10 (new) cobalt APIs
-        api_url = f"{instance}/api/json" if "api.cobalt.tools" not in instance else f"{instance}/"
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        }
-        try:
-            r = req.post(api_url, json=payload, headers=headers, timeout=15)
-            if r.ok:
-                data = r.json()
-                # If API returns a direct URL
-                if "url" in data and data["url"]:
-                    return data["url"]
-                # Some v10 APIs return {"status": "stream", "url": "..."}
-                if data.get("status") in ["stream", "redirect", "success"] and "url" in data:
-                    return data["url"]
-            last_err = f"{instance} donus kodu: {r.status_code}"
-        except Exception as e:
-            last_err = str(e)
-            continue
-            
-    raise Exception(f"Hicbir Cobalt sunucusu MP3'e donusturemedi. Son hata: {last_err[:100]}")
-
-
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
 YT_CLIENTS = ["ios", "android_vr", "tv_embedded", "web_creator"]
@@ -238,33 +194,37 @@ def _do_download(job_id: str, url: str, format_id: str, dl_type: str):
         os.makedirs("./downloads", exist_ok=True)
         filepath = None
 
-        # ── YouTube MP3 via youtube-mp36 ─────────────────────────────────────
         if is_youtube(url) and format_id.startswith("mp3::"):
-            video_id = format_id.split("::")[1]
-            jobs[job_id]["progress"] = 5
-            mp3_url = get_youtube_mp3_url(video_id)
-            jobs[job_id]["progress"] = 50
-            filename = f"vidfetch_{job_id}.mp3"
-            filepath = f"./downloads/{filename}"
-            dl_headers = {"User-Agent": "Mozilla/5.0"}
-            with req.get(mp3_url, stream=True, timeout=300, headers=dl_headers) as r:
-                r.raise_for_status()
-                total = int(r.headers.get("content-length", 0))
-                done = 0
-                tick = 0
-                with open(filepath, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=65536):
-                        if chunk:
-                            f.write(chunk)
-                            done += len(chunk)
-                            tick += 1
-                            if total > 0:
-                                pct = 50 + round((done / total) * 45)
-                                jobs[job_id]["progress"] = min(pct, 95)
-                            else:
-                                # Unknown length — animate progress slowly up to 90
-                                jobs[job_id]["progress"] = min(50 + tick, 90)
-            clean_name = filename.replace(f"_{job_id}", "")
+            # YouTube MP3 via our own yt-dlp (uses iOS bypass)
+            def hook(d):
+                if d["status"] == "downloading":
+                    tot = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                    dn = d.get("downloaded_bytes", 0)
+                    if tot > 0:
+                        jobs[job_id]["progress"] = round((dn / tot) * 90)
+                elif d["status"] == "finished":
+                    jobs[job_id]["progress"] = 95
+
+            ydl_opts = {
+                **_yt_opts(),
+                "format": "bestaudio/best", # Download best audio
+                "outtmpl": f"./downloads/{job_id}_%(title)s.%(ext)s",
+                "progress_hooks": [hook],
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+            }
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(url, download=True)
+
+            files = glob.glob(f"./downloads/{job_id}_*")
+            if not files:
+                raise Exception("Dosya indirilemedi")
+            filepath = files[0]
+            clean_name = os.path.basename(filepath).replace(f"{job_id}_", "")
 
 
         # ── YouTube/Other video via yt-dlp (mobile client for YouTube) ────────
