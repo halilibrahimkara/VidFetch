@@ -1,6 +1,8 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
+# ffmpeg: birleştirme/dönüşüm · nodejs: yt-dlp web istemcisinde EJS imza çözümü (aksi halde yalnızca storyboard kalabiliyor)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

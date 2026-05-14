@@ -59,17 +59,19 @@ def extract_youtube_id(url: str) -> str:
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
-# web: bazı sunucularda / IP’lerde yalnızca mobil istemciler kalırsa birleştirilmiş
-# kalite seçilemez; çerezle “web” yedek format üretir. tv_embedded artık desteklenmiyor.
-YT_CLIENTS = ["ios", "android_vr", "web_creator", "web"]
+# android: bazı müzik / resmi içeriklere doğrudan uygun kalite döner · web için imza çözümü Docker'da Node gerekir
+YT_CLIENTS = ["android", "android_vr", "ios", "web_creator", "web"]
 
 
 def _yt_merge_format(cap_h: int) -> str:
-    """yükseklik tavanı için birleştirme; eşleşmezse daha gevşek yedeklere düşer."""
+    """yükseklik tavanı için birleştirme; storyboard/format uyuşmazlığına karşı sıkı + gevşek yedek."""
     return "/".join(
         [
+            f"bestvideo[height<={cap_h}][vcodec!=none]+bestaudio[acodec!=none]",
             f"bestvideo[height<={cap_h}]+bestaudio",
+            f"best[height<={cap_h}][vcodec!=none][acodec!=none]",
             f"best[height<={cap_h}]",
+            "bestvideo[vcodec!=none]+bestaudio[acodec!=none]",
             "bestvideo+bestaudio",
             "best",
         ]
