@@ -13,6 +13,10 @@ import threading
 import shutil
 import tempfile
 import requests as req
+import base64 as _cookie_b64mod
+import logging
+
+_log = logging.getLogger("uvicorn.error")
 
 # ── FFmpeg path ───────────────────────────────────────────────────────────────
 _FFMPEG_EXE = shutil.which("ffmpeg")
@@ -21,6 +25,22 @@ FFMPEG_BIN = os.path.dirname(_FFMPEG_EXE) if _FFMPEG_EXE else ""
 # ── Cookies (YouTube bot / giriş ekranı için) ─────────────────────────────────
 _COOKIE_FILE = None
 _COOKIES_FROM_BROWSER = None
+
+
+def _decoded_bytes_from_screen_pasted_b64(raw: str) -> bytes | None:
+    """Render / pano yapıştırmalarında boşluk ve url-safe karakter için."""
+    compact = "".join((raw or "").split())
+    if not compact:
+        return None
+    pad = (-len(compact)) % 4
+    padded = compact + ("=" * pad if pad else "")
+    for dec in (_cookie_b64mod.urlsafe_b64decode, _cookie_b64mod.b64decode):
+        try:
+            return dec(padded, validate=False)
+        except Exception:
+            continue
+    return None
+
 
 _cookie_path = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
 if _cookie_path:
@@ -37,14 +57,27 @@ if _browser:
 if not _COOKIE_FILE and not _COOKIES_FROM_BROWSER:
     _cookie_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
     if _cookie_b64:
-        import base64 as _b64
+        _bin = _decoded_bytes_from_screen_pasted_b64(_cookie_b64)
         try:
-            _cc = _b64.b64decode(_cookie_b64).decode("utf-8")
-            _tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-            _tmp.write(_cc); _tmp.close()
-            _COOKIE_FILE = _tmp.name
-        except Exception:
-            pass
+            if _bin:
+                _cc = _bin.decode("utf-8")
+                if "# Netscape" not in _cc and ".youtube.com" not in _cc:
+                    _log.warning(
+                        "YOUTUBE_COOKIES_B64 decodes but looks unlike a Netscape cookie file;"
+                        " export youtube.com cookies again."
+                    )
+                _tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False, encoding="utf-8"
+                )
+                _tmp.write(_cc)
+                _tmp.close()
+                _COOKIE_FILE = _tmp.name
+        except Exception as ex:
+            _log.warning("YOUTUBE_COOKIES_B64 could not be decoded: %s", ex)
+
+_HAS_YT_COOKIES = bool(_COOKIE_FILE or _COOKIES_FROM_BROWSER)
+if os.environ.get("YOUTUBE_COOKIES_B64", "").strip() and not _HAS_YT_COOKIES:
+    _log.warning("YOUTUBE_COOKIES_B64 set but decoding failed — YouTube bot errors likely.")
 
 # ── RapidAPI (MP3 only via youtube-mp36) ─────────────────────────────────────
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY", "").strip()
@@ -59,8 +92,14 @@ def extract_youtube_id(url: str) -> str:
 # ── YouTube MP3 via youtube-mp36 (CDN-hosted) ─────────────────────────────────
 
 # ── yt-dlp helpers ────────────────────────────────────────────────────────────
-# android: bazı müzik / resmi içeriklere doğrudan uygun kalite döner · web için imza çözümü Docker'da Node gerekir
-YT_CLIENTS = ["android", "android_vr", "ios", "web_creator", "web"]
+# android: bazı içeriklere uygun kalite · web için imza çözümü Docker'da Node gerekir
+# Çerez varken web önde: oturum + "bot doğrula" ile uyumu artırır
+_YT_PC_NO_AUTH = ["android", "android_vr", "ios", "web_creator", "web"]
+_YT_PC_WITH_AUTH = ["web", "android", "android_vr", "ios", "web_creator"]
+
+
+def _youtube_player_clients() -> list:
+    return list(_YT_PC_WITH_AUTH if _HAS_YT_COOKIES else _YT_PC_NO_AUTH)
 
 
 def _yt_merge_format(cap_h: int) -> str:
@@ -86,7 +125,7 @@ def _yt_opts(extra: dict = None) -> dict:
         "noplaylist": True,
         "extractor_args": {
             "youtube": {
-                "player_client": YT_CLIENTS,
+                "player_client": _youtube_player_clients(),
                 # dash atlanırsa bazı ortamlarda ayrı ses+görüntü akışları kayboluyor
                 "skip": ["translated_subs"],
             }
@@ -137,7 +176,7 @@ def cleanup_file(fp: str):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "ffmpeg": FFMPEG_BIN}
+    return {"status": "ok", "ffmpeg": FFMPEG_BIN, "youtube_auth_cookies": _HAS_YT_COOKIES}
 
 @app.post("/api/info")
 def get_video_info(req_body: VideoRequest):
